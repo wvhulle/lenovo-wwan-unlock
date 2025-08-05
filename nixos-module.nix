@@ -1,64 +1,74 @@
-{
-  pkgs,
-  lib,
-  config,
-  ...
-}:
-
-with lib;
+{ config, lib, pkgs, ... }:
 
 let
+  inherit (lib) mkEnableOption mkIf mkOption types;
   cfg = config.hardware.lenovo.wwan;
 
-  # Extract FCC unlock scripts from the provided archive
+  # USB ID mapping for supported manufacturers
+  manufacturerUsbIds = {
+    MediaTek = "14c3:4d75";
+    Intel = "8086:7560";
+    Quectel = "2c7c:6008";
+  };
+
+  # Upstream Lenovo repository
+  lenovoWwanUnlock = pkgs.fetchFromGitHub {
+    owner = "lenovo";
+    repo = "lenovo-wwan-unlock";
+    rev = "6bc2138677cad43cd67fb23ec73869efd8beda46";
+    hash = "sha256-ibclz63Nw+ivBx7jdHgAhpTesbHiYn21XpCfQTf4bnI=";
+  };
+
+  # FCC unlock scripts package
   fccUnlockScripts = pkgs.stdenv.mkDerivation {
-    name = "lenovo-fcc-unlock-scripts";
-    src = ./.;
+    pname = "lenovo-fcc-unlock-scripts";
+    version = "unstable";
+    src = lenovoWwanUnlock;
 
     buildPhase = ''
+      runHook preBuild
+      
       mkdir -p $out/share/ModemManager/fcc-unlock.available.d
       tar -zxf fcc-unlock.d.tar.gz
       cp -r fcc-unlock.d/* $out/share/ModemManager/fcc-unlock.available.d/
       chmod +x $out/share/ModemManager/fcc-unlock.available.d/*
+      
+      runHook postBuild
     '';
 
-    installPhase = ''
-      # Already done in buildPhase
-    '';
+    dontInstall = true;
   };
 
-  # Create systemd service for SAR configuration
-  sarConfigService = pkgs.writeShellScriptBin "lenovo-sar-config" ''
-    ${cfg.sarConfigBinary}/bin/configservice_lenovo
-  '';
-
-  # Package the SAR configuration files and binaries
+  # SAR configuration package
   sarConfigPackage = pkgs.stdenv.mkDerivation {
-    name = "lenovo-sar-config";
-    src = ./.;
+    pname = "lenovo-sar-config";
+    version = "unstable";
+    src = lenovoWwanUnlock;
 
-    buildInputs = with pkgs; [
-      zlib
-      openssl
-    ];
+    nativeBuildInputs = with pkgs; [ zlib openssl ];
 
     buildPhase = ''
+      runHook preBuild
+      
       mkdir -p $out/{bin,lib,share}
-
-      # Extract SAR config files
       tar -zxf sar_config_files.tar.gz -C $out/share/
-
-      # Copy libraries
-      cp libmodemauth.so libconfigserviceR+.so libconfigservice350.so libmbimtools.so $out/lib/
-
-      # Copy binaries
+      cp *.so $out/lib/
       cp DPR_Fcc_unlock_service configservice_lenovo $out/bin/
       chmod +x $out/bin/*
+      
+      runHook postBuild
     '';
 
-    installPhase = ''
-      # Already done in buildPhase
-    '';
+    dontInstall = true;
+  };
+
+  # Current USB ID for the configured manufacturer
+  usbId = manufacturerUsbIds.${cfg.modemManufacturer};
+
+  # FCC unlock script configuration
+  fccUnlockScript = {
+    id = usbId;
+    path = "${fccUnlockScripts}/share/ModemManager/fcc-unlock.available.d/${usbId}";
   };
 
 in
@@ -66,51 +76,40 @@ in
   options.hardware.lenovo.wwan = {
     enable = mkEnableOption "Lenovo WWAN FCC unlock support";
 
-    modemId = mkOption {
-      type = types.enum [
-        "mediatek"
-        "intel"
-        "quectel"
-      ];
-      description = "Modem manufacturer";
-      example = "quectel";
+    modemManufacturer = mkOption {
+      type = types.enum (builtins.attrNames manufacturerUsbIds);
+      example = "Quectel";
+      description = ''
+        Modem manufacturer. Run `mmcli -m 0` to identify your modem manufacturer.
+      '';
     };
 
     enableSarConfig = mkOption {
       type = types.bool;
       default = true;
-      description = "Enable SAR configuration service";
+      description = "Whether to enable SAR configuration service.";
     };
 
     sarConfigBinary = mkOption {
       type = types.package;
       default = sarConfigPackage;
-      description = "Package containing SAR configuration binaries";
+      internal = true;
+      description = "Package containing SAR configuration binaries.";
     };
   };
 
   config = mkIf cfg.enable {
-    # Configure FCC unlock scripts for ModemManager
-    networking =
-      let
-        # Map manufacturer names to USB IDs
-        usbIds = {
-          mediatek = "14c3:4d75";
-          intel = "8086:7560";
-          quectel = "2c7c:6008";
-        };
-        usbId = usbIds.${cfg.modemId};
-        fcc_unlock_script = {
-          id = usbId;
-          path = "${fccUnlockScripts}/share/ModemManager/fcc-unlock.available.d/${usbId}";
-        };
-      in
-      if lib.versionOlder lib.version "25.05pre" then
-        { networkmanager.fccUnlockScripts = [ fcc_unlock_script ]; }
-      else
-        { modemmanager.fccUnlockScripts = [ fcc_unlock_script ]; };
+    # Enable ModemManager service
+    services.modemmanager.enable = true;
 
-    # Configure SAR service if enabled
+    # Configure FCC unlock scripts for ModemManager
+    networking = 
+      if lib.versionOlder lib.version "25.05pre" then
+        { networkmanager.fccUnlockScripts = [ fccUnlockScript ]; }
+      else
+        { modemmanager.fccUnlockScripts = [ fccUnlockScript ]; };
+
+    # SAR configuration service
     systemd.services.lenovo-sar-config = mkIf cfg.enableSarConfig {
       description = "Lenovo SAR Configuration Service";
       after = [ "ModemManager.service" ];
@@ -119,18 +118,13 @@ in
       serviceConfig = {
         Type = "simple";
         User = "root";
-        ExecStart = "${sarConfigService}/bin/lenovo-sar-config";
+        ExecStart = "${cfg.sarConfigBinary}/bin/configservice_lenovo";
         Restart = "on-failure";
         RestartSec = 20;
       };
     };
 
-    # Ensure required packages are available
-    environment.systemPackages = with pkgs; [
-      modemmanager
-      libmbim
-      pciutils
-      usbutils
-    ];
+    # Provide mmcli for modem manufacturer discovery
+    environment.systemPackages = [ pkgs.modemmanager ];
   };
 }
