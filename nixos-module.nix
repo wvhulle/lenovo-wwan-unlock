@@ -1,7 +1,17 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
-  inherit (lib) mkEnableOption mkIf mkOption types;
+  inherit (lib)
+    mkEnableOption
+    mkIf
+    mkOption
+    types
+    ;
   cfg = config.hardware.lenovo.wwan;
 
   # USB ID mapping for supported manufacturers
@@ -27,12 +37,12 @@ let
 
     buildPhase = ''
       runHook preBuild
-      
+
       mkdir -p $out/share/ModemManager/fcc-unlock.available.d
       tar -zxf fcc-unlock.d.tar.gz
       cp -r fcc-unlock.d/* $out/share/ModemManager/fcc-unlock.available.d/
       chmod +x $out/share/ModemManager/fcc-unlock.available.d/*
-      
+
       runHook postBuild
     '';
 
@@ -45,17 +55,20 @@ let
     version = "unstable";
     src = lenovoWwanUnlock;
 
-    nativeBuildInputs = with pkgs; [ zlib openssl ];
+    nativeBuildInputs = with pkgs; [
+      zlib
+      openssl
+    ];
 
     buildPhase = ''
       runHook preBuild
-      
+
       mkdir -p $out/{bin,lib,share}
       tar -zxf sar_config_files.tar.gz -C $out/share/
       cp *.so $out/lib/
       cp DPR_Fcc_unlock_service configservice_lenovo $out/bin/
       chmod +x $out/bin/*
-      
+
       runHook postBuild
     '';
 
@@ -99,11 +112,9 @@ in
   };
 
   config = mkIf cfg.enable {
-    # Enable ModemManager service
-    services.modemmanager.enable = true;
 
     # Configure FCC unlock scripts for ModemManager
-    networking = 
+    networking =
       if lib.versionOlder lib.version "25.05pre" then
         { networkmanager.fccUnlockScripts = [ fccUnlockScript ]; }
       else
