@@ -58,9 +58,9 @@ in {
     enable = mkEnableOption "Lenovo WWAN FCC unlock support";
     
     modemId = mkOption {
-      type = types.str;
-      description = "USB vendor:product ID of the modem (e.g., '2c7c:6008')";
-      example = "2c7c:6008";
+      type = types.enum [ "mediatek" "intel" "quectel" ];
+      description = "Modem manufacturer";
+      example = "quectel";
     };
     
     enableSarConfig = mkOption {
@@ -80,9 +80,16 @@ in {
     # Configure FCC unlock scripts for ModemManager
     networking = 
       let
+        # Map manufacturer names to USB IDs
+        usbIds = {
+          mediatek = "14c3:4d75";
+          intel = "8086:7560";
+          quectel = "2c7c:6008";
+        };
+        usbId = usbIds.${cfg.modemId};
         fcc_unlock_script = {
-          id = cfg.modemId;
-          path = "${fccUnlockScripts}/share/ModemManager/fcc-unlock.available.d/${cfg.modemId}";
+          id = usbId;
+          path = "${fccUnlockScripts}/share/ModemManager/fcc-unlock.available.d/${usbId}";
         };
       in
       if lib.versionOlder lib.version "25.05pre" then
