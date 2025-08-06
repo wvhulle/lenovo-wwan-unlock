@@ -1,17 +1,8 @@
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}:
+{ config, lib, pkgs, ... }:
+
+with lib;
 
 let
-  inherit (lib)
-    mkEnableOption
-    mkIf
-    mkOption
-    types
-    ;
   cfg = config.hardware.lenovo.wwan;
 
   # USB ID mapping for supported manufacturers
@@ -22,7 +13,7 @@ let
   };
 
   # Upstream Lenovo repository
-  lenovoWwanUnlock = pkgs.fetchFromGitHub {
+  src = pkgs.fetchFromGitHub {
     owner = "lenovo";
     repo = "lenovo-wwan-unlock";
     rev = "6bc2138677cad43cd67fb23ec73869efd8beda46";
@@ -32,28 +23,24 @@ let
   # FCC unlock scripts package
   fccUnlockScripts = pkgs.stdenv.mkDerivation {
     pname = "lenovo-fcc-unlock-scripts";
-    version = "unstable";
-    src = lenovoWwanUnlock;
+    version = "unstable-2024-01-01";
+    inherit src;
 
-    buildPhase = ''
-      runHook preBuild
-
+    installPhase = ''
+      runHook preInstall
       mkdir -p $out/share/ModemManager/fcc-unlock.available.d
-      tar -zxf fcc-unlock.d.tar.gz
+      tar -xzf fcc-unlock.d.tar.gz
       cp -r fcc-unlock.d/* $out/share/ModemManager/fcc-unlock.available.d/
       chmod +x $out/share/ModemManager/fcc-unlock.available.d/*
-
-      runHook postBuild
+      runHook postInstall
     '';
-
-    dontInstall = true;
   };
 
   # SAR configuration package
   sarConfigPackage = pkgs.stdenv.mkDerivation {
     pname = "lenovo-sar-config";
-    version = "unstable";
-    src = lenovoWwanUnlock;
+    version = "unstable-2024-01-01";
+    inherit src;
 
     nativeBuildInputs = with pkgs; [
       autoPatchelfHook
@@ -61,43 +48,36 @@ let
     ];
 
     buildInputs = with pkgs; [
-      zlib
       openssl
       glib
       libmbim
       modemmanager
       pciutils
-      usbutils
-      stdenv.cc.cc.lib
+      zlib
+      stdenv.cc.cc.lib  # for libstdc++
     ];
 
-    buildPhase = ''
-      runHook preBuild
-
+    installPhase = ''
+      runHook preInstall
+      
+      # Extract and install files
       mkdir -p $out/{bin,lib,share}
-      tar -zxf sar_config_files.tar.gz -C $out/share/
-      cp *.so $out/lib/
-      cp DPR_Fcc_unlock_service configservice_lenovo $out/bin/
-      chmod +x $out/bin/*
-
-      # Create a simple wrapper that sets up the environment
-      wrapProgram $out/bin/configservice_lenovo \
-        --prefix PATH : ${lib.makeBinPath [ pkgs.pciutils pkgs.usbutils pkgs.coreutils ]}
-
-      runHook postBuild
+      tar -xzf sar_config_files.tar.gz -C $out/share/
+      install -m755 *.so $out/lib/
+      install -m755 DPR_Fcc_unlock_service configservice_lenovo $out/bin/
+      
+      runHook postInstall
     '';
 
-    dontInstall = true;
+    # Wrap binaries with required PATH
+    postFixup = ''
+      wrapProgram $out/bin/configservice_lenovo \
+        --prefix PATH : ${makeBinPath [ pkgs.pciutils pkgs.usbutils pkgs.coreutils ]}
+    '';
   };
 
-  # Current USB ID for the configured manufacturer
-  usbId = manufacturerUsbIds.${cfg.modemManufacturer};
-
-  # FCC unlock script configuration
-  fccUnlockScript = {
-    id = usbId;
-    path = "${fccUnlockScripts}/share/ModemManager/fcc-unlock.available.d/${usbId}";
-  };
+  # Helper to get the current USB ID
+  currentUsbId = manufacturerUsbIds.${cfg.modemManufacturer};
 
 in
 {
@@ -105,11 +85,9 @@ in
     enable = mkEnableOption "Lenovo WWAN FCC unlock support";
 
     modemManufacturer = mkOption {
-      type = types.enum (builtins.attrNames manufacturerUsbIds);
+      type = types.enum (attrNames manufacturerUsbIds);
       example = "Quectel";
-      description = ''
-        Modem manufacturer. Run `mmcli -m 0` to identify your modem manufacturer.
-      '';
+      description = "Modem manufacturer. Run `mmcli -m 0` to identify your modem manufacturer.";
     };
 
     enableSarConfig = mkOption {
@@ -117,23 +95,21 @@ in
       default = true;
       description = "Whether to enable SAR configuration service.";
     };
-
-    sarConfigBinary = mkOption {
-      type = types.package;
-      default = sarConfigPackage;
-      internal = true;
-      description = "Package containing SAR configuration binaries.";
-    };
   };
 
   config = mkIf cfg.enable {
-
-    # Configure FCC unlock scripts for ModemManager
-    networking =
-      if lib.versionOlder lib.version "25.05pre" then
-        { networkmanager.fccUnlockScripts = [ fccUnlockScript ]; }
-      else
-        { modemmanager.fccUnlockScripts = [ fccUnlockScript ]; };
+    # Configure FCC unlock scripts based on NixOS version
+    networking = if versionOlder version "25.05pre" then {
+      networkmanager.fccUnlockScripts = [{
+        id = currentUsbId;
+        path = "${fccUnlockScripts}/share/ModemManager/fcc-unlock.available.d/${currentUsbId}";
+      }];
+    } else {
+      modemmanager.fccUnlockScripts = [{
+        id = currentUsbId;
+        path = "${fccUnlockScripts}/share/ModemManager/fcc-unlock.available.d/${currentUsbId}";
+      }];
+    };
 
     # SAR configuration service
     systemd.services.lenovo-sar-config = mkIf cfg.enableSarConfig {
@@ -141,21 +117,27 @@ in
       after = [ "ModemManager.service" ];
       wantedBy = [ "multi-user.target" ];
 
-      path = [ pkgs.pciutils pkgs.usbutils pkgs.bash pkgs.procps pkgs.modemmanager ];
+      path = with pkgs; [ 
+        pciutils 
+        usbutils 
+        procps 
+        modemmanager 
+        coreutils
+        bash
+      ];
 
       serviceConfig = {
-        Type = "simple";
-        User = "root";
-        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /usr/bin";
-        ExecStart = let
-          wrapperScript = pkgs.writeScript "lenovo-sar-wrapper" ''
-            #!${pkgs.bash}/bin/bash
-            # Create symlinks if they don't exist
-            [ ! -e /usr/bin/lspci ] && ln -sf ${pkgs.pciutils}/bin/lspci /usr/bin/lspci
-            [ ! -e /usr/bin/lsusb ] && ln -sf ${pkgs.usbutils}/bin/lsusb /usr/bin/lsusb
-            exec ${cfg.sarConfigBinary}/bin/configservice_lenovo "$@"
-          '';
-        in "${wrapperScript}";
+        Type = "oneshot";
+        RemainAfterExit = true;
+        
+        # Create symlinks for hardcoded paths
+        ExecStartPre = [
+          "${pkgs.coreutils}/bin/mkdir -p /usr/bin"
+          "${pkgs.bash}/bin/bash -c '[ ! -e /usr/bin/lspci ] && ln -sf ${pkgs.pciutils}/bin/lspci /usr/bin/lspci || true'"
+          "${pkgs.bash}/bin/bash -c '[ ! -e /usr/bin/lsusb ] && ln -sf ${pkgs.usbutils}/bin/lsusb /usr/bin/lsusb || true'"
+        ];
+        
+        ExecStart = "${sarConfigPackage}/bin/configservice_lenovo";
         Restart = "on-failure";
         RestartSec = 20;
       };
