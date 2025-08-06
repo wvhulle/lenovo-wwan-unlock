@@ -57,6 +57,7 @@ let
 
     nativeBuildInputs = with pkgs; [
       autoPatchelfHook
+      makeWrapper
     ];
 
     buildInputs = with pkgs; [
@@ -66,6 +67,7 @@ let
       libmbim
       modemmanager
       pciutils
+      usbutils
       stdenv.cc.cc.lib
     ];
 
@@ -77,6 +79,10 @@ let
       cp *.so $out/lib/
       cp DPR_Fcc_unlock_service configservice_lenovo $out/bin/
       chmod +x $out/bin/*
+
+      # Create a simple wrapper that sets up the environment
+      wrapProgram $out/bin/configservice_lenovo \
+        --prefix PATH : ${lib.makeBinPath [ pkgs.pciutils pkgs.usbutils pkgs.coreutils ]}
 
       runHook postBuild
     '';
@@ -135,10 +141,21 @@ in
       after = [ "ModemManager.service" ];
       wantedBy = [ "multi-user.target" ];
 
+      path = [ pkgs.pciutils pkgs.usbutils pkgs.bash pkgs.procps pkgs.modemmanager ];
+
       serviceConfig = {
         Type = "simple";
         User = "root";
-        ExecStart = "${cfg.sarConfigBinary}/bin/configservice_lenovo";
+        ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p /usr/bin";
+        ExecStart = let
+          wrapperScript = pkgs.writeScript "lenovo-sar-wrapper" ''
+            #!${pkgs.bash}/bin/bash
+            # Create symlinks if they don't exist
+            [ ! -e /usr/bin/lspci ] && ln -sf ${pkgs.pciutils}/bin/lspci /usr/bin/lspci
+            [ ! -e /usr/bin/lsusb ] && ln -sf ${pkgs.usbutils}/bin/lsusb /usr/bin/lsusb
+            exec ${cfg.sarConfigBinary}/bin/configservice_lenovo "$@"
+          '';
+        in "${wrapperScript}";
         Restart = "on-failure";
         RestartSec = 20;
       };
