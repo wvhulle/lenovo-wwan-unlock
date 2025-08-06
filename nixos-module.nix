@@ -56,8 +56,17 @@ let
     src = lenovoWwanUnlock;
 
     nativeBuildInputs = with pkgs; [
+      autoPatchelfHook
+    ];
+
+    buildInputs = with pkgs; [
       zlib
       openssl
+      glib
+      libmbim
+      modemmanager
+      pciutils
+      stdenv.cc.cc.lib
     ];
 
     buildPhase = ''
